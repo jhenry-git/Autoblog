@@ -1,0 +1,8 @@
+
+python main.py --topic "Medical VA and how it helps to make institutions more productive"
+    *If you want specific sub-sections for the AI to follow, you can provide context:*
+```bash
+python main.py --topic "Medical VA benefits" --context "increased productivity" "cost savings" "staff satisfaction"
+
+
+python main.py (Google Trends)

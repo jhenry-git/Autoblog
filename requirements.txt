@@ -1,0 +1,20 @@
+# Functions Framework for Python 3 HTTP Cloud Functions
+functions-framework==3.*
+
+# Web requests
+requests>=2.31.0
+
+# Flask is included via functions-framework, but explicit version is safe
+flask>=2.3.2
+
+# Environment variable management
+python-dotenv>=1.0.0
+
+# Google Gemini / OpenAI LLM SDK
+openai>=0.27.8
+
+# Google Pytrends for trend scraping
+pytrends>=4.9.0
+
+# Optional: if using Sanity client via HTTP requests
+# sanity-client or any other library if required
