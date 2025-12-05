@@ -16,5 +16,7 @@ openai>=0.27.8
 # Google Pytrends for trend scraping
 pytrends>=4.9.0
 
-# Optional: if using Sanity client via HTTP requests
-# sanity-client or any other library if required
+# --- NEW: Image Generation & Publisher Updates ---
+google-genai>=0.3.0    # Required for the new 'Nano Banana' (Gemini 2.5) script
+pillow>=10.0.0         # Required for image processing (PIL)
+pydantic>=2.0.0        # Required for error handling in the new script
