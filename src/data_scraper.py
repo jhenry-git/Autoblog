@@ -1,85 +1,99 @@
-import datetime
 import time
+import random
 from pytrends.request import TrendReq
-import pandas as pd
+import logging
+
+# Configure logging
+logger = logging.getLogger()
 
 # Increase the default connection timeout for better stability
 TRENDS_TIMEOUT = 10
 
 # Use a seed list of general high-level topics to find breakout trends within them.
-# This method is often more stable than the real-time trending feed.
+# This serves as a backup if no specific niche query is provided.
 SEED_KEYWORDS = ['AI technology', 'software development', 'cloud computing', 'cybersecurity']
 
-def get_trending_topic(region='', timeframe='today 3-m', category=0):
+def get_trending_topic(query=None):
     """
-    Connects to Google Trends, uses a seed list of keywords to find "Rising" related queries,
-    and selects the top rising query as the topic. This avoids the unstable trending_searches endpoint.
-
-    Args:
-        region (str): Geographic location code (e.g., 'US', 'GB', '' for global).
-        timeframe (str): Time range (e.g., 'today 12-m', 'today 3-m').
-        category (int): Topic category ID (0 is all categories).
-
-    Returns:
-        tuple: (keyword, context) or (None, None) if no topic is selected.
-    """
-    print(f"--- 1. Sourcing data from Google Trends (Region: {region or 'Global'}) ---")
+    Attempts to fetch a trending topic from Google Trends.
     
-    # Initialize TrendReq with the extended timeout
-    pytrends = TrendReq(hl='en-US', tz=360, timeout=(5, TRENDS_TIMEOUT))
+    Args:
+        query (str, optional): A specific keyword to search for (e.g., "Medical VA").
+                               If None, searches for general tech trends using SEED_KEYWORDS.
+    
+    Returns:
+        tuple: (topic_title, list_of_context_points) OR (None, None) if failed.
+    """
+    target = query if query else "General Tech Seeds"
+    print(f"--- 1. Sourcing data from Google Trends (Target: {target}) ---")
 
-    topic = None
-    all_rising_queries = []
-
-    # Iterate through the seed keywords to find rising trends within each category
-    for seed in SEED_KEYWORDS:
-        print(f"  -> Checking rising queries for seed topic: '{seed}'")
-        try:
-            # Build payload and fetch related queries
-            pytrends.build_payload([seed], cat=category, timeframe=timeframe, geo=region)
+    try:
+        # 1. Initialize Pytrends with strict timeout settings
+        # This prevents the script from hanging if Google blocks the IP.
+        pytrends = TrendReq(
+            hl='en-US',
+            tz=360,
+            timeout=(5, TRENDS_TIMEOUT),
+            retries=2,
+            backoff_factor=1
+        )
+        
+        # --- PATH A: Specific Niche Query (from main.py) ---
+        if query:
+            print(f"  -> Searching trends for specific niche: '{query}'")
+            pytrends.build_payload([query], timeframe='now 7-d')
             related_queries = pytrends.related_queries()
             
-            # The related_queries result is a nested dictionary keyed by the input keyword
-            if seed in related_queries and 'rising' in related_queries[seed]:
-                rising_df = related_queries[seed]['rising']
-                if not rising_df.empty:
-                    # Append all rising queries found to the list
-                    all_rising_queries.extend(rising_df['query'].tolist())
+            # Check if we got valid data for this query
+            if related_queries and query in related_queries:
+                rising_df = related_queries[query]['rising']
+                top_df = related_queries[query]['top']
+                
+                # Priority 1: Rising queries (Breakout trends)
+                if rising_df is not None and not rising_df.empty:
+                    trend_row = rising_df.sample().iloc[0]
+                    trend_name = trend_row['query']
+                    print(f"  -> Found rising trend: {trend_name}")
+                    return trend_name, [f"Rising trend related to {query}", "Current market interest"]
+                
+                # Priority 2: Top queries (Consistent interest)
+                elif top_df is not None and not top_df.empty:
+                    trend_row = top_df.head(5).sample().iloc[0]
+                    trend_name = trend_row['query']
+                    print(f"  -> Found top trend: {trend_name}")
+                    return trend_name, [f"Popular search related to {query}", "High search volume topic"]
             
-        except Exception as e:
-            print(f"  -> Failed to fetch related queries for '{seed}': {e}")
-            time.sleep(2) # Brief wait before trying the next seed
+            print("  -> No specific trends found for this niche. Falling back...")
 
-    if not all_rising_queries:
-        print("Could not find any rising trending queries from the seed list.")
-        return None, None
-    
-    # Select the first unique rising query found as the main topic
-    unique_rising_queries = list(set(all_rising_queries))
-    topic = unique_rising_queries[0]
-    
-    print(f"-> Selected Topic (Rising Trend): {topic}")
-
-    # --- Fetch Related Queries for Context (for the chosen topic) ---
-    context = []
-    try:
-        # Get context specifically for the chosen trending topic
-        pytrends.build_payload([topic], cat=category, timeframe=timeframe, geo=region)
-        related_queries = pytrends.related_queries()
+        # --- PATH B: General Seed Keywords (Backup) ---
+        # If no query provided, OR if specific query returned no results:
+        print("  -> Checking general seed keywords for trends...")
+        all_rising_queries = []
         
-        if topic in related_queries and 'top' in related_queries[topic]:
-            top_queries = related_queries[topic]['top']
-            # Use the top queries as context for the AI writer
-            context = top_queries['query'].tolist()[:3]
+        for seed in SEED_KEYWORDS:
+            try:
+                pytrends.build_payload([seed], timeframe='now 7-d')
+                related = pytrends.related_queries()
+                if seed in related and 'rising' in related[seed]:
+                    r_df = related[seed]['rising']
+                    if r_df is not None and not r_df.empty:
+                        all_rising_queries.extend(r_df['query'].tolist())
+            except Exception:
+                continue # Skip this seed if it fails, try the next
+        
+        if all_rising_queries:
+            # Pick a random trend from the list
+            selected_topic = random.choice(list(set(all_rising_queries)))
+            print(f"-> Selected General Trend: {selected_topic}")
+            return selected_topic, ["Tech industry trend", "Rising interest"]
 
     except Exception as e:
-        print(f"Warning: Could not fetch secondary related queries for context. {e}")
+        # --- CRITICAL SAFETY NET ---
+        # Catches 429 (Too Many Requests) and ConnectTimeout errors.
+        # Returns None so main.py can use the Educational Fallback instead of crashing.
+        print(f"  -> Google Trends Error (Likely blocked or timed out): {e}")
+        print("  -> Skipping Trends. Engaging Fallback Protocol.")
+        return None, None
 
-    print(f"-> Related Context: {context}")
-    return topic, context
-
-if __name__ == '__main__':
-    # Test function
-    keyword, context = get_trending_topic(region='')
-    if keyword:
-        print(f"\nSuccessfully fetched topic: {keyword} with context: {context}")
+    print("  -> No trends found.")
+    return None, None

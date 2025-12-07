@@ -2,6 +2,7 @@ import requests
 import json
 import time
 import os
+
 from config.sanity_config import (
     SANITY_API_URL,
     SANITY_WRITE_TOKEN,
@@ -9,9 +10,13 @@ from config.sanity_config import (
     get_post_document_template
 )
 
+# --- SEO Enhancer Integration ---
+from seo_enhancer import enhance_post, load_index, save_index
+
 # Constant for the author ID used by the bot
 AI_AUTHOR_ID = "ai-bot"
 AI_AUTHOR_NAME = "Autoblog AI Agent"
+
 
 def ensure_author_document_exists():
     """
@@ -45,6 +50,7 @@ def ensure_author_document_exists():
         print(f"Error ensuring AI author document exists: {e}")
         return False
 
+
 def upload_image_to_sanity(image_path):
     """
     Uploads a local image file to Sanity and returns the Asset ID.
@@ -55,26 +61,18 @@ def upload_image_to_sanity(image_path):
 
     print(f"📤 Uploading image to Sanity: {image_path}")
 
-    # 1. Construct the Asset URL dynamically from the API URL
-    # SANITY_API_URL looks like: https://<proj>.api.sanity.io/v2021-06-07/data/mutate/<dataset>
-    # Assets URL needs to be:    https://<proj>.api.sanity.io/v2021-06-07/assets/images/<dataset>
     asset_url = SANITY_API_URL.replace("/data/mutate/", "/assets/images/")
 
     headers = {
         "Authorization": f"Bearer {SANITY_WRITE_TOKEN}",
-        "Content-Type": "image/png" # Assuming PNG from Gemini, adjust if needed
+        "Content-Type": "image/png"
     }
 
     try:
         with open(image_path, "rb") as img_file:
-            response = requests.post(
-                asset_url,
-                headers=headers,
-                data=img_file
-            )
+            response = requests.post(asset_url, headers=headers, data=img_file)
             response.raise_for_status()
             
-            # Sanity returns a JSON with the document, including its _id
             asset_document = response.json().get('document', {})
             asset_id = asset_document.get('_id')
             
@@ -89,16 +87,14 @@ def upload_image_to_sanity(image_path):
         print(f"❌ Error uploading image to Sanity: {e}")
         return None
 
+
 def publish_to_sanity(generated_content, image_path=None):
     """
     Creates a new document in Sanity and triggers the frontend deployment.
     
     Args:
-        generated_content (dict): The structured content from the AI generator.
-        image_path (str, optional): Path to the generated local image file.
-        
-    Returns:
-        bool: True if publishing and deployment were successful, False otherwise.
+        generated_content (dict): Content structure from the AI generator.
+        image_path (str, optional): Local path to the generated image.
     """
     print("--- 3. Publishing content to Sanity.io ---")
     
@@ -106,25 +102,54 @@ def publish_to_sanity(generated_content, image_path=None):
         print("Error: No content provided for publishing.")
         return False
 
-    # 1. Ensure the required Author Document exists
+    # --- Ensure AI Author Exists ---
     if not ensure_author_document_exists():
         print("Publishing aborted: Could not create/verify AI author document.")
         return False
 
-    # 2. Upload Image (if provided)
+    # --- Upload Main Blog Image ---
     image_asset_id = None
     if image_path:
         image_asset_id = upload_image_to_sanity(image_path)
 
-    # 3. Prepare the Sanity Document Structure
+    # ============================================================
+    # 🚀 SEO Enhancer Integration
+    # ============================================================
+    print("🔍 Enhancing SEO metadata...")
+
+    # Load the index of all previous posts
+    index = load_index()
+
+    # Enhance SEO using the full SEO engine
+    enhanced = enhance_post(
+        post={
+            "title": generated_content.get("title", "Untitled"),
+            "slug": generated_content.get("slug", ""),
+            "content": generated_content.get("plain_text_body", ""),
+            "images": [image_path] if image_path else [],
+            "date": generated_content.get("date"),
+            "category": generated_content.get("category", "general")
+        },
+        index=index
+    )
+
+    seo_meta = enhanced.get("meta", {})
+
+    # Update index and save
+    index.append(seo_meta)
+    save_index(index)
+
+    print("✅ SEO enhancement complete.")
+
+    # --- Prepare the Sanity Document ---
     document = get_post_document_template(
-        title=generated_content['title'],
-        slug=generated_content['slug'],
-        body_portable_text=generated_content['portable_text_body'],
+        title=generated_content.get('title', 'Untitled'),
+        slug=seo_meta.get("slug", generated_content.get('slug', '')),
+        body_portable_text=generated_content.get('portable_text_body', []),
         author_id=AI_AUTHOR_ID
     )
 
-    # 4. Attach the Main Image if upload was successful
+    # --- Attach Main Image ---
     if image_asset_id:
         document['mainImage'] = {
             '_type': 'image',
@@ -132,10 +157,30 @@ def publish_to_sanity(generated_content, image_path=None):
                 '_type': 'reference',
                 '_ref': image_asset_id
             },
-            'alt': generated_content['title'] # Use title as alt text
+            'alt': seo_meta.get("image_alt", generated_content.get('title', 'Blog Image'))
         }
-    
-    # 5. Create the Mutation
+
+    # --- Inject SEO Fields (Safe Defaults) ---
+    document["seo"] = {
+        "metaTitle": seo_meta.get("meta_title", ""),
+        "metaDescription": seo_meta.get("meta_description", ""),
+        "canonicalUrl": seo_meta.get("canonical_url", ""),
+        "keywords": seo_meta.get("keywords", []),
+        "readingTime": seo_meta.get("reading_time", 1),
+        "internalLinks": enhanced.get("internal_links", []),
+        "faqs": enhanced.get("faqs", []),
+        
+        # 👇 UPDATED: Convert JSON objects to Strings using json.dumps()
+        "jsonldArticle": json.dumps(enhanced.get("jsonld", {}).get("article", {})),
+        "jsonldFaq": json.dumps(enhanced.get("jsonld", {}).get("faq", {})),
+        
+        "ogImage": seo_meta.get("image"),
+        "imageAlt": seo_meta.get("image_alt"),
+    }
+
+    print("✅ SEO fields successfully attached to Sanity document.")
+
+    # --- Mutation Payload ---
     mutation = {
         "mutations": [
             {
@@ -144,7 +189,7 @@ def publish_to_sanity(generated_content, image_path=None):
         ]
     }
     
-    # 6. Send the Post Mutation to Sanity
+    # --- POST Document to Sanity ---
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {SANITY_WRITE_TOKEN}"
@@ -159,10 +204,14 @@ def publish_to_sanity(generated_content, image_path=None):
             result_data = sanity_response.json()['results'][0]
             document_id = result_data.get('document', {}).get('_id', result_data.get('id', 'UNKNOWN_ID'))
             
-            print(f"-> Successfully created document: {generated_content['title']} (ID: {document_id})")
+            print(f"-> Successfully created document: {generated_content.get('title', 'Untitled')} (ID: {document_id})")
             break
             
         except requests.exceptions.RequestException as e:
+            # 👇 UPDATED: Print detailed Sanity error response for debugging
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"\n❌ SANITY ERROR DETAILS:\n{e.response.text}\n")
+            
             if attempt < max_retries - 1:
                 print(f"Sanity publishing attempt {attempt + 1} failed: {e}. Retrying in 2s...")
                 time.sleep(2)
@@ -170,7 +219,7 @@ def publish_to_sanity(generated_content, image_path=None):
                 print(f"Final error publishing to Sanity.io: {e}")
                 return False
         
-    # 7. Trigger Frontend Deployment
+    # --- Trigger Frontend Deployment ---
     print("--- 4. Triggering frontend build ---")
     if not DEPLOYMENT_WEBHOOK_URL:
         print("Warning: DEPLOYMENT_WEBHOOK_URL is not set. Skipping deployment trigger.")
