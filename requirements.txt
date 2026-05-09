@@ -13,8 +13,11 @@ python-dotenv>=1.0.0
 # Google Gemini / OpenAI LLM SDK
 openai>=0.27.8
 
-# Google Pytrends for trend scraping
+# Google Pytrends for trend scraping (kept as secondary fallback)
 pytrends>=4.9.0
+
+# RSS Feed parsing for primary trend scraping
+feedparser>=6.0.10
 
 # --- NEW: Image Generation & Publisher Updates ---
 google-genai>=0.3.0    # Required for the new 'Nano Banana' (Gemini 2.5) script

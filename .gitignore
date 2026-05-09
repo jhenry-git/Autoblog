@@ -1,10 +1,53 @@
-
+# Virtual environments
 venv/
+env/
+.venv/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.env
-.DS_Store
+*.egg-info/
+dist/
+build/
+
+# Environment & secrets
 .env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated assets
 generated_images/
+static/images/*.png
+static/images/*.jpg
+static/images/*.jpeg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Coverage
+.coverage
+htmlcov/
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json

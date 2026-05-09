@@ -1,25 +1,63 @@
+"""
+src/content_generator.py - Enhanced content generation with improved image support.
+Uses centralized config and modern async patterns.
+"""
+
 import json
-import requests
 import time
 import re
-from config.sanity_config import GEMINI_API_KEY
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, Dict, Any
+import requests
 
-# Base API for Gemini
-API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
+from config.settings import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_API_URL
+
+# Default model - can be changed to gpt-4o-mini or gpt-3.5-turbo for cost savings
+OPENAI_TEMPERATURE = 0.7
+OPENAI_MAX_TOKENS = 4000
+
+# ---------------------------------------------------------------------------
+# Portable Text Conversion (Enhanced with Image Block Support)
+# ---------------------------------------------------------------------------
+def insert_image_block(alt_text: str, asset_id: str = None) -> Dict[str, Any]:
+    """
+    Create a Portable Text image block.
+    
+    Args:
+        alt_text: Alt text for accessibility
+        asset_id: Optional Sanity asset ID reference
+    """
+    block = {
+        "_type": "image",
+        "alt": alt_text,
+        "_key": str(hash(f"{alt_text}_{time.time()}"))
+    }
+    
+    if asset_id:
+        block["asset"] = {
+            "_type": "reference",
+            "_ref": asset_id
+        }
+    
+    return block
 
 
-# -----------------------------------------------------------
-# Portable Text Conversion (Markdown-Free + Table Support)
-# -----------------------------------------------------------
-def markdown_to_portable_text(markdown_text):
+def markdown_to_portable_text(markdown_text, images_map: Dict[str, str] = None):
     """
     Converts Markdown-like text to Sanity Portable Text.
+    
     Features:
     - Numbered headings (e.g., "1. Preliminary Triage") become H2
     - Removes all hashes (#) and M-dashes (—)
     - Converts simple tables (lines with '|') into structured table objects
     - Strips bold (**), italics (*), and extra spaces
+    - Supports inline image injection via images_map
+    
+    Args:
+        markdown_text: Raw markdown content
+        images_map: Optional dict mapping heading text -> Sanity asset ID to insert images
     """
+    images_map = images_map or {}
     blocks = []
     lines = markdown_text.split("\n")
     table_rows = []
@@ -58,19 +96,35 @@ def markdown_to_portable_text(markdown_text):
         text_content = " ".join(text_content.split())
 
         style = "normal"
+        heading_text = None
 
         # --- Heading Detection (Numbered) ---
         # Detects "1. Title", "2. Title", etc.
         if re.match(r"^\d+\.\s+", text_content):
             style = "h2"
-            # Remove the number prefix (optional, keep if you want numbers in H2)
-            # text_content = re.sub(r"^\d+\.\s+", "", text_content)
+            heading_text = re.sub(r"^\d+\.\s+", "", text_content)
+            
+            # --- Injected Image Check ---
+            if heading_text and heading_text in images_map:
+                # Insert image block before the heading
+                blocks.append(insert_image_block(
+                    f"Illustration for {heading_text}",
+                    images_map[heading_text]
+                ))
 
         # --- Heading Detection (Legacy/Safety) ---
-        # Just in case Gemini slips up and uses #
+        # Just in case the model slips up and uses #
         elif text_content.startswith("## "):
             style = "h2"
-            text_content = text_content[3:].strip()
+            heading_text = text_content[3:].strip()
+            
+            # --- Injected Image Check ---
+            if heading_text and heading_text in images_map:
+                blocks.append(insert_image_block(
+                    f"Illustration for {heading_text}",
+                    images_map[heading_text]
+                ))
+                
         elif text_content.startswith("# "):
             style = "h1" # Though usually H1 is reserved for title
             text_content = text_content[2:].strip()
@@ -96,105 +150,93 @@ def markdown_to_portable_text(markdown_text):
     return blocks
 
 
-# -----------------------------------------------------------
-# Blog Post Generation via Gemini
-# -----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Blog Post Generation via OpenAI
+# ---------------------------------------------------------------------------
 def generate_blog_post(topic, context):
     """
-    Generates a structured, SEO-optimized blog post.
+    Generates a structured, SEO-optimized blog post using the Article Schema.
+    Uses OpenAI GPT-4o with JSON mode.
     Returns:
-    - title
-    - slug
-    - seo_title
-    - meta_description
-    - keywords
-    - excerpt
-    - reading_time_minutes
-    - portable_text_body
+    - Article object (dict) matching the src.models.Article definition.
     """
 
-    print("--- 2. Generating SEO-optimized content via Gemini ---")
+    print(f"--- 2. Generating structured content via OpenAI ({OPENAI_MODEL}) ---")
 
     # -----------------------------------------------------------
-    # SYSTEM INSTRUCTION (SEO + Markdown-Free + Table Handling)
+    # SYSTEM INSTRUCTION (Strict Schema)
     # -----------------------------------------------------------
-    system_instruction = (
-        "You are an expert SEO content strategist and senior blog writer. "
-        "You write long-form, human-sounding, fully SEO-optimized articles.\n\n"
-        "SEO RULES YOU MUST FOLLOW:\n"
-        "1. Create an SEO title separate from the H1.\n"
-        "2. Add a meta description (155–170 characters).\n"
-        "3. Add a clear H1 title.\n"
-        "4. Use 3–5 rich H2 sections.\n"
-        "5. Add a list of 5–12 SEO keywords.\n"
-        "6. Provide a 40–60 word excerpt.\n"
-        "7. Include an internal link to another GlideX blog (https://www.glidexoutsourcing.com/blog/real-estate-virtual-assistants-coordinating-showings or any other article available in the blog.) (fake link not OK).\n"
-        "8. Include 1–2 authoritative outbound links (.gov, .edu, or credible sources).\n"
-        "9. Avoid M-dashes (—), bold (**), italics (*), and hashes (#).\n"
-        "10. Number all headings using '1.', '2.', '3.' format instead of hashes.\n"
-        "11. If a table is needed, use standard pipe syntax (| Col 1 | Col 2 |).\n"
-        "12. Content must sound human, helpful, authoritative, and non-repetitive.\n"
-    )
+    system_instruction = """You are an expert SEO content strategist. You do not just write text; you architect high-quality blog posts.
+
+YOUR GOAL: Create a structured JSON object representing a full blog post.
+
+STRUCTURE RULES:
+1. 'hero_image': You MUST define a hero image with a descriptive 'prompt' field for image generation.
+2. 'sections': You MUST generate at least 4 detailed sections.
+3. 'image' in sections: For at least 2 of the sections, you MUST provide an 'image' object with a descriptive prompt.
+4. 'body': The body of each section should be rich Markdown (headings, lists, bolding allowed).
+5. Content: Professional, authoritative, human-sounding.
+
+OUTPUT FORMAT: Valid JSON only, no markdown code blocks."""
 
     # -----------------------------------------------------------
-    # USER QUERY
+    # USER QUERY with JSON Schema
     # -----------------------------------------------------------
-    user_query = (
-        f"Generate a fully SEO-optimized long-form blog post about: '{topic}'. "
-        "Use the following subtopics as H2 sections: "
-        f"{', '.join(context)}.\n\n"
-        "Return JSON with the following fields:\n"
-        "- title (H1)\n"
-        "- slug (URL-friendly)\n"
-        "- seo_title\n"
-        "- meta_description\n"
-        "- keywords (list)\n"
-        "- excerpt (40–60 words)\n"
-        "- reading_time_minutes\n"
-        "- body_markdown (full article, avoid # for headings, use 1. 2. 3.)\n\n"
-        "Ensure the structure is clean, readable, unique, and SEO optimized."
-    )
+    user_query = f"""Generate a blog post about: '{topic}'.
+Context/Subtopics: {', '.join(context)}.
+
+Output MUST be valid JSON adhering to this exact schema:
+{{
+  "title": "The main blog post title",
+  "slug": "url-friendly-slug",
+  "seo_title": "SEO optimized title (max 60 chars)",
+  "meta_description": "Meta description for search engines (max 160 chars)",
+  "keywords": ["keyword1", "keyword2", "keyword3"],
+  "excerpt": "A compelling 2-3 sentence excerpt",
+  "reading_time_minutes": 5,
+  "hero_image": {{
+    "role": "hero",
+    "prompt": "Detailed image generation prompt for the hero image",
+    "alt_text": "Alt text for accessibility"
+  }},
+  "sections": [
+    {{
+      "heading": "Section Heading",
+      "body": "Markdown content for this section...",
+      "image": {{
+        "role": "section",
+        "prompt": "Detailed image generation prompt for this section",
+        "heading_ref": "Section Heading",
+        "alt_text": "Alt text for this image"
+      }}
+    }}
+  ]
+}}
+
+IMPORTANT: 
+- Generate at least 4 sections
+- At least 2 sections must have images
+- All prompts should be detailed enough for AI image generation
+- Output ONLY valid JSON, no explanations"""
 
     # -----------------------------------------------------------
-    # JSON SCHEMA
-    # -----------------------------------------------------------
-    response_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "title": {"type": "STRING"},
-            "slug": {"type": "STRING"},
-            "seo_title": {"type": "STRING"},
-            "meta_description": {"type": "STRING"},
-            "keywords": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "excerpt": {"type": "STRING"},
-            "reading_time_minutes": {"type": "INTEGER"},
-            "body_markdown": {"type": "STRING"}
-        },
-        "required": [
-            "title",
-            "slug",
-            "seo_title",
-            "meta_description",
-            "keywords",
-            "excerpt",
-            "reading_time_minutes",
-            "body_markdown"
-        ]
-    }
-
-    # -----------------------------------------------------------
-    # API PAYLOAD
+    # API PAYLOAD (OpenAI format)
     # -----------------------------------------------------------
     payload = {
-        "contents": [{"parts": [{"text": user_query}]}],
-        "systemInstruction": {"parts": [{"text": system_instruction}]},
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": response_schema
-        }
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": user_query}
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": OPENAI_TEMPERATURE,
+        "max_tokens": OPENAI_MAX_TOKENS
     }
 
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+    }
 
     # -----------------------------------------------------------
     # RETRY LOGIC
@@ -204,22 +246,24 @@ def generate_blog_post(topic, context):
     for attempt in range(max_retries):
         try:
             response = requests.post(
-                f"{API_URL}?key={GEMINI_API_KEY}",
+                OPENAI_API_URL,
                 headers=headers,
-                json=payload
+                json=payload,
+                timeout=120  # 2 minute timeout for long content
             )
 
             response.raise_for_status()
 
             result = response.json()
-            if "candidates" not in result or not result["candidates"]:
-                raise ValueError("No candidates returned from Gemini.")
+            
+            if "choices" not in result or not result["choices"]:
+                raise ValueError("No choices returned from OpenAI.")
 
-            json_text = result["candidates"][0]["content"]["parts"][0]["text"]
+            json_text = result["choices"][0]["message"]["content"]
             generated_data = json.loads(json_text)
 
             # ---------------------------------------------------
-            # CLEANUP — ENFORCE URL SLUG FORMAT
+            # CLEANUP & VALIDATION PREP
             # ---------------------------------------------------
             generated_data["slug"] = (
                 generated_data["slug"]
@@ -228,19 +272,20 @@ def generate_blog_post(topic, context):
                 .replace(" ", "-")
                 .replace("--", "-")
             )
-
-            # ---------------------------------------------------
-            # CONVERT MARKDOWN TO PORTABLE TEXT (Sanity)
-            # ---------------------------------------------------
-            generated_data["portable_text_body"] = markdown_to_portable_text(
-                generated_data["body_markdown"]
-            )
-
-            del generated_data["body_markdown"]
-
+            
+            # Note: We rely on models.validate_article to check deep logic later.
             print(f"-> Content generated successfully: {generated_data['title']}")
             return generated_data
 
+        except requests.exceptions.HTTPError as e:
+            error_detail = ""
+            try:
+                error_detail = response.json().get("error", {}).get("message", "")
+            except:
+                error_detail = response.text[:500]
+            print(f"Attempt {attempt + 1} failed (HTTP {response.status_code}): {error_detail}")
+            time.sleep(2 ** attempt)
+            
         except Exception as e:
             print(f"Attempt {attempt + 1} failed: {e}")
             if "response" in locals():

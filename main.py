@@ -42,6 +42,7 @@ def run_autoblog_workflow(manual_topic=None, manual_context=None):
         ]
     }
 
+
     # Lazy imports
     try:
         from src.data_scraper import get_trending_topic
@@ -49,7 +50,8 @@ def run_autoblog_workflow(manual_topic=None, manual_context=None):
         from src.image_gen import generate_blog_image
         from src.publisher import publish_to_sanity
         from src.seo_enhancer import slugify
-        from config.sanity_config import GEMINI_API_KEY
+        from config.settings import GEMINI_API_KEY
+        from src.models import Article, validate_article  # Import new models
     except ImportError as e:
         logger.error(f"Import Error: {e}")
         print("CRITICAL: Failed imports in main.py.")
@@ -90,59 +92,91 @@ def run_autoblog_workflow(manual_topic=None, manual_context=None):
                 f"Why GlideX Outsourcing is the best solution for {specific_point}"
             ]
 
-    # --- Content Generation ---
+    # --- Content Generation (StrictMode) ---
     if not GEMINI_API_KEY:
         print("❌ GEMINI_API_KEY missing — cannot generate content.")
         return
 
-    generated_content = generate_blog_post(topic, context)
-    if not generated_content:
-        print("❌ Content generation failed.")
+    raw_article_data = generate_blog_post(topic, context)
+    if not raw_article_data:
+        print("❌ Content generation failed (No data returned).")
         return
 
-    # --- Assign Missing Fields for SEO ---
-    generated_content["slug"] = generated_content.get("slug") or slugify(topic)
-    generated_content["category"] = category
-    generated_content["plain_text_body"] = (
-        generated_content.get("body_text") or
-        generated_content.get("text_only") or
-        generated_content.get("raw_text") or
-        generated_content.get("plain_text") or
-        ""
-    )
-
-    # Safety fallback for portable text
-    if "portable_text_body" not in generated_content:
-        # Ensure it is always a list of blocks
-        generated_content["portable_text_body"] = (
-            generated_content.get("body_html") or
-            [{"_type": "block", "style": "normal", "children":[{"_key":"fallback","_type":"span","text":generated_content["plain_text_body"],"marks":[]}]}]
-        )
-
-    print(f"SEO: plain_text_body length = {len(generated_content['plain_text_body'])}")
-
-    # --- Image Generation ---
-    print(f"🖼️ Generating featured image for '{topic}'...")
-    image_path = generate_blog_image(topic)
-    if image_path:
-        print(f"✅ Image generated at: {image_path}")
-    else:
-        print("⚠️ No image generated.")
-
-    # --- Publish ---
+    # --- Validate Structure (Integrity Gate) ---
     try:
-        success = publish_to_sanity(generated_content, image_path)
-    except TypeError:
-        print("⚠️ Publisher not updated to handle images — sending text only.")
-        success = publish_to_sanity(generated_content)
+        print("🔍 Validating Article Structure...")
+        # Populate Category manually since it's outside the generation scope
+        # (Model doesn't have category currently, pass it separately or add to model)
+        # We'll stick to model validation.
+        
+        article = Article(**raw_article_data)
+        
+        if not validate_article(article):
+            print("❌ Article failed integrity check. Aborting.")
+            return
+
+    except Exception as e:
+        print(f"❌ Validation Error: {e}")
+        return
+
+    print("✅ Article Structure Validated. Proceeding to Imagery.")
+
+    # --- Parallel Image Generation ---
+    if article.hero_image or any(section.image for section in article.sections):
+        print("🖼️ Preparing image generation jobs...")
+        
+        # Import the parallel image generation functions
+        from src.image_gen import prepare_jobs_from_article, generate_all_blog_images
+        
+        # Prepare all image jobs
+        image_jobs = prepare_jobs_from_article(article)
+        
+        if image_jobs:
+            # Generate all images in parallel
+            print(f"🚀 Starting parallel generation for {len(image_jobs)} images...")
+            image_results = generate_all_blog_images(
+                image_jobs=image_jobs,
+                max_workers=int(os.getenv("MAX_PARALLEL_IMAGES", "3")),
+                output_dir="generated_images"
+            )
+            
+            # Update article with generated image paths
+            if article.hero_image and 'hero' in image_results:
+                hero_path = image_results['hero']
+                if hero_path:
+                    article.hero_image.asset_id = hero_path # Storing path temporarily
+                else:
+                    print("⚠️ Hero image generation failed.")
+            
+            # Update section images
+            for i, section in enumerate(article.sections):
+                job_id = f'section_{i}'
+                if section.image and job_id in image_results:
+                    sec_path = image_results[job_id]
+                    if sec_path:
+                        section.image.asset_id = sec_path # Storing path temporarily
+                    else:
+                        print(f"      ⚠️ Failed to generate image for section {i}")
+        else:
+            print("ℹ️ No image generation jobs found.")
+
+    # --- Publish (Strict Only) ---
+    try:
+        # We pass the full article object now. 
+        # Publisher needs to be refactored to accept this object.
+        success = publish_to_sanity(article, category=category)
+    except TypeError as e:
+        print(f"❌ Publisher error (Signature Mismatch?): {e}") 
+        # Fallback for legacy publisher (will break with new object, so likely needs update first)
+        return
 
     if success:
         print("==============================================")
-        print(f"== 🎉 Cycle Complete! Blog '{topic}' published ==")
+        print(f"== 🎉 Cycle Complete! Blog '{article.title}' published ==")
         print("==============================================")
     else:
         print("==============================================")
-        print("== ❌ Cycle Failed: Check logs ==")
+        print("== ❌ Cycle Failed during Publishing ==")
         print("==============================================")
 
 # --- CLI Entrypoint ---
@@ -156,3 +190,4 @@ if __name__ == "__main__":
     sys.path.append("config")
 
     run_autoblog_workflow(args.topic, args.context)
+

@@ -4,4 +4,12 @@
 export PYTHONUNBUFFERED=1
 
 # Run the Autoblog workflow
-python main.py
+# Check for virtual environment
+if [ -d "venv" ]; then
+    echo "Using virtual environment..."
+    venv/bin/python main.py "$@"
+else
+    echo "Using system python..."
+    python main.py "$@"
+fi
+
